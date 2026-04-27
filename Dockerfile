@@ -5,7 +5,7 @@ WORKDIR /app
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1
 
-# Aggiornato: libgl1-mesa-glx → libgl1
+# CORRETTO: usa libgl1 invece di libgl1-mesa-glx
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libgl1 \
     libglib2.0-0 \
