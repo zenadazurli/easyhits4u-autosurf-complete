@@ -238,7 +238,7 @@ def generate_cookie():
                         'password': EASYHITS_PASSWORD,
                         'cookies_string': cookie_string,
                         'user_id': cookies['user_id'],
-                        'sesids': cookies['sesids'],  # CORRETTO: 'sesids' con s
+                        'sesids': cookies['sesids'],
                         'status': 'active',
                         'created_at': datetime.now().isoformat(),
                         'updated_at': datetime.now().isoformat()
@@ -295,7 +295,7 @@ def init_math_ocr():
     except Exception as e:
         log(f"⚠️ EasyOCR non disponibile: {e}")
 
-# ================ RICONOSCIMENTO CAPTCHA MATEMATICO (CORRETTO) ====================
+# ================ RICONOSCIMENTO CAPTCHA MATEMATICO ====================
 def preprocess_math(image_path):
     """Preprocessing per captcha matematici"""
     img = cv2.imread(image_path)
@@ -334,8 +334,7 @@ def safe_remove(file_path):
             pass
 
 def riconosci_captcha_matematico(image_path):
-    """Pipeline riconoscimento captcha matematici - versione corretta"""
-    # Verifica che il file esista
+    """Pipeline riconoscimento captcha matematici"""
     if not os.path.exists(image_path):
         log(f"⚠️ File {image_path} non trovato")
         return None
@@ -357,8 +356,8 @@ def riconosci_captcha_matematico(image_path):
                 safe_remove(temp_path)
                 safe_remove(image_path)
                 return int(numeri[0]), int(numeri[1])
-        except Exception as e:
-            log(f"   DdddOcr errore: {e}")
+        except:
+            pass
     
     # Livello 2: EasyOCR
     if easy_ocr:
@@ -371,8 +370,8 @@ def riconosci_captcha_matematico(image_path):
                 safe_remove(temp_path)
                 safe_remove(image_path)
                 return int(numeri[0]), int(numeri[1])
-        except Exception as e:
-            log(f"   EasyOCR errore: {e}")
+        except:
+            pass
     
     # Livello 3: Tesseract
     try:
@@ -383,10 +382,10 @@ def riconosci_captcha_matematico(image_path):
             safe_remove(temp_path)
             safe_remove(image_path)
             return int(numeri[0]), int(numeri[1])
-    except Exception as e:
-        log(f"   Tesseract errore: {e}")
+    except:
+        pass
     
-    # Salva errore e pulisci
+    # Salva errore
     salva_errore_matematico(image_path)
     safe_remove(temp_path)
     safe_remove(image_path)
@@ -576,22 +575,41 @@ def main():
                 if picmap is None or len(picmap) == 0:
                     log("🧮 Captcha matematico rilevato")
                     
-                    # Scarica immagine captcha
-                    img_data = session.get(f"https://www.easyhits4u.com/simg/{qpic}.jpg", verify=False).content
-                    temp_path = "temp_math.jpg"
-                    with open(temp_path, "wb") as f:
-                        f.write(img_data)
-                    
-                    risultato = riconosci_captcha_matematico(temp_path)
-                    
-                    if risultato:
-                        a, b = risultato
-                        log(f"📊 Numeri rilevati: {a}, {b}")
-                        # TODO: implementare logica con opzioni e invio risposta
-                        captcha_counter += 1
-                        log(f"✅ OK #{captcha_counter}")
-                    else:
-                        log("❌ Captcha matematico non riconosciuto")
+                    try:
+                        # Scarica immagine captcha
+                        img_url = f"https://www.easyhits4u.com/simg/{qpic}.jpg"
+                        img_response = session.get(img_url, verify=False, timeout=30)
+                        
+                        if img_response.status_code != 200:
+                            log(f"   ❌ Download fallito: HTTP {img_response.status_code}")
+                            time.sleep(seconds)
+                            continue
+                        
+                        temp_path = "temp_math.jpg"
+                        with open(temp_path, "wb") as f:
+                            f.write(img_response.content)
+                        
+                        if not os.path.exists(temp_path) or os.path.getsize(temp_path) == 0:
+                            log("   ❌ File non creato o vuoto")
+                            time.sleep(seconds)
+                            continue
+                        
+                        risultato = riconosci_captcha_matematico(temp_path)
+                        
+                        if risultato:
+                            a, b = risultato
+                            log(f"📊 Numeri rilevati: {a}, {b}")
+                            # TODO: Implementare invio risposta al server
+                            captcha_counter += 1
+                            log(f"✅ OK #{captcha_counter}")
+                        else:
+                            log("❌ Captcha matematico non riconosciuto")
+                        
+                        # Pulisci
+                        safe_remove(temp_path)
+                        
+                    except Exception as e:
+                        log(f"   ❌ Errore scaricamento: {e}")
                     
                     time.sleep(seconds)
                     continue
