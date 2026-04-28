@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # autosurf_complete.py - Autosurf con supporto figure + captcha matematici
-# Versione: si ferma su qualsiasi errore e salva per analisi
+# Versione con upload captcha non risolti su Supabase Storage
 
 import os
 import sys
@@ -26,6 +26,10 @@ SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
 
 BROWSERLESS_SUPABASE_URL = os.environ.get("BROWSERLESS_SUPABASE_URL")
 BROWSERLESS_SUPABASE_KEY = os.environ.get("BROWSERLESS_SUPABASE_KEY")
+
+# NUOVO: Configurazione per Supabase Storage (captcha non risolti)
+MATH_SUPABASE_URL = os.environ.get("MATH_SUPABASE_URL")
+MATH_SUPABASE_KEY = os.environ.get("MATH_SUPABASE_KEY")
 
 EASYHITS_EMAIL = os.environ.get("EASYHITS_EMAIL", "sandrominori50+uujkrczveemscvo@gmail.com")
 EASYHITS_PASSWORD = os.environ.get("EASYHITS_PASSWORD", "DDnmVV45!!")
@@ -345,7 +349,7 @@ def riconosci_operazione_da_immagine(image_path):
         except:
             pass
     
-    # Livello 2: EasyOCR (se DdddOcr non ha funzionato)
+    # Livello 2: EasyOCR
     if len(numeri_rilevati) < 2 and easy_ocr:
         try:
             results = easy_ocr.readtext(processed)
@@ -375,6 +379,64 @@ def riconosci_operazione_da_immagine(image_path):
         return numeri_rilevati[0], numeri_rilevati[1]
     
     return None, None
+
+def upload_captcha_to_supabase(image_path, surfses, urlid, qpic):
+    """Upload captcha matematico non risolto su Supabase Storage"""
+    try:
+        if not MATH_SUPABASE_URL or not MATH_SUPABASE_KEY:
+            log("⚠️ MATH_SUPABASE_URL o MATH_SUPABASE_KEY non impostate")
+            return False
+        
+        supabase_math = create_client(MATH_SUPABASE_URL, MATH_SUPABASE_KEY)
+        
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S%f")[:-3]
+        
+        # Leggi immagine
+        with open(image_path, "rb") as f:
+            file_data = f.read()
+        
+        # Upload su bucket
+        file_path = f"{timestamp}/captcha.jpg"
+        supabase_math.storage.from_("math-captchas").upload(
+            file_path,
+            file_data,
+            {"content-type": "image/jpeg"}
+        )
+        
+        log(f"📤 Captcha caricato su Supabase: {file_path}")
+        return True
+        
+    except Exception as e:
+        log(f"⚠️ Errore upload: {e}")
+        return False
+
+def salva_errore_matematico(surfses, urlid, qpic, image_path=None):
+    """Salva captcha matematico non riconosciuto"""
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S%f")[:-3]
+    folder = os.path.join(ERRORI_DIR, f"math_{timestamp}")
+    os.makedirs(folder, exist_ok=True)
+    
+    if image_path and os.path.exists(image_path):
+        import shutil
+        dest_path = os.path.join(folder, "captcha.jpg")
+        shutil.copy(image_path, dest_path)
+        
+        # Upload su Supabase Storage
+        upload_captcha_to_supabase(dest_path, surfses, urlid, qpic)
+    
+    metadata = {
+        "timestamp": timestamp,
+        "urlid": urlid,
+        "qpic": qpic,
+        "surfses": surfses,
+        "account_email": EASYHITS_EMAIL,
+        "account_name": ACCOUNT_NAME
+    }
+    
+    with open(os.path.join(folder, "metadata.json"), "w") as f:
+        json.dump(metadata, f, indent=2)
+    
+    log(f"📁 Captcha matematico salvato in {folder}")
 
 def risolvi_captcha_matematico(surfses, image_path):
     """
@@ -427,36 +489,8 @@ def risolvi_captcha_matematico(surfses, image_path):
             log(f"   ✅ Differenza: {num2} - {num1} = {diff2} → nelle opzioni")
             return converti_numero_in_parole(diff2)
     
-    # Nessuna operazione ha dato un risultato nelle opzioni
-    log(f"   ❌ Nessuna operazione valida: somma={somma}, differenze={num1-num2 if num1>num2 else num2-num1}")
+    log(f"   ❌ Nessuna operazione valida: somma={somma}")
     return None
-
-def salva_errore_matematico(surfses, urlid, qpic, image_path=None):
-    """Salva captcha matematico non riconosciuto"""
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S%f")[:-3]
-    folder = os.path.join(ERRORI_DIR, f"math_{timestamp}")
-    os.makedirs(folder, exist_ok=True)
-    
-    # Salva l'immagine se esiste
-    if image_path and os.path.exists(image_path):
-        import shutil
-        shutil.copy(image_path, os.path.join(folder, "captcha.jpg"))
-    
-    # Salva metadata
-    metadata = {
-        "timestamp": timestamp,
-        "urlid": urlid,
-        "qpic": qpic,
-        "surfses": surfses,
-        "account_email": EASYHITS_EMAIL,
-        "account_name": ACCOUNT_NAME,
-        "tipo": "matematico_non_riconosciuto"
-    }
-    
-    with open(os.path.join(folder, "metadata.json"), "w") as f:
-        json.dump(metadata, f, indent=2)
-    
-    log(f"📁 Captcha matematico salvato in {folder}")
 
 # ================ FUNZIONI PER CAPTCHA FIGURE ====================
 def centra_figura(image):
@@ -664,16 +698,13 @@ def main():
                     # ===== CAPTCHA A FIGURE =====
                     log("🎯 Captcha a figure rilevato")
                     
-                    # Scarica immagine
                     img_data = session.get(f"https://www.easyhits4u.com/simg/{qpic}.jpg", verify=False).content
                     img = cv2.imdecode(np.frombuffer(img_data, np.uint8), cv2.IMREAD_COLOR)
                     
-                    # Riconosci ogni figura
                     crops = [crop_safe(img, p.get("coords", "")) for p in picmap]
                     labels = [predict_figure(c) for c in crops]
                     log(f"📋 Labels figure: {labels}")
                     
-                    # Cerca duplicati per label
                     seen = {}
                     chosen_idx = None
                     for i, label in enumerate(labels):
@@ -684,21 +715,18 @@ def main():
                                 break
                             seen[label] = i
                     
-                    # Fallback: confronto pixel se il riconoscimento label fallisce
                     if chosen_idx is None:
                         log("⚠️ Nessun duplicato per label, provo fallback pixel...")
                         chosen_idx = fallback_pixel_compare(crops)
                         if chosen_idx is not None:
                             log(f"🎯 Duplicato via fallback pixel: posizione {chosen_idx}")
                     
-                    # Se ancora nessun duplicato → ERRORE → FERMA
                     if chosen_idx is None:
                         log("❌ Nessun duplicato trovato - Errore riconoscimento")
                         salva_errore_figure(qpic, img, picmap, labels, None, "nessun_duplicato", urlid)
                         log("🛑 FERMO PER ANALISI - Account da cambiare")
                         return
                     
-                    # Attendi e invia risposta
                     time.sleep(seconds)
                     word = picmap[chosen_idx]["value"]
                     log(f"📤 Invio risposta: word={word}")
@@ -718,7 +746,6 @@ def main():
                         log("🛑 FERMO PER ANALISI - Account da cambiare")
                         return
                     
-                    # Successo!
                     captcha_counter += 1
                     log(f"✅ OK #{captcha_counter} (punteggio: {warning})")
                     
@@ -728,16 +755,14 @@ def main():
                     
                     surfses = data.get("surfses", {})
                     
-                    # Scarica l'immagine del captcha
+                    # Scarica l'immagine
                     img_data = session.get(f"https://www.easyhits4u.com/simg/{qpic}.jpg", verify=False).content
                     temp_path = "temp_math.jpg"
                     with open(temp_path, "wb") as f:
                         f.write(img_data)
                     
-                    # Tenta di risolvere
                     risposta_parola = risolvi_captcha_matematico(surfses, temp_path)
                     
-                    # Se non si è sicuri (None) → ERRORE → FERMA
                     if risposta_parola is None:
                         log("❌ Captcha matematico NON RICONOSCIUTO con certezza")
                         salva_errore_matematico(surfses, urlid, qpic, temp_path)
@@ -746,7 +771,6 @@ def main():
                         log("🛑 FERMO PER ANALISI - Account da cambiare")
                         return
                     
-                    # Attendi e invia risposta
                     log(f"📤 Invio risposta: word={risposta_parola}")
                     time.sleep(seconds)
                     
@@ -767,11 +791,9 @@ def main():
                         log("🛑 FERMO PER ANALISI - Account da cambiare")
                         return
                     
-                    # Successo!
                     captcha_counter += 1
                     log(f"✅ OK #{captcha_counter} (punteggio: {warning})")
                     
-                    # Pulisci
                     if os.path.exists(temp_path):
                         os.remove(temp_path)
                 
