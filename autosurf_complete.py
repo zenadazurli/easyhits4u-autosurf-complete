@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 # autosurf_complete.py - Autosurf con supporto figure + captcha matematici
+# Versione: si ferma su captcha non riconosciuti e salva per analisi
 
 import os
 import sys
@@ -385,21 +386,30 @@ def riconosci_captcha_matematico(image_path):
     except:
         pass
     
-    # Salva errore
-    salva_errore_matematico(image_path)
+    # Non riconosciuto - salva errore
     safe_remove(temp_path)
-    safe_remove(image_path)
     return None
 
 def salva_errore_matematico(image_path):
     """Salva captcha matematico non riconosciuto"""
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S%f")[:-3]
     folder = os.path.join(ERRORI_DIR, f"math_{timestamp}")
     os.makedirs(folder, exist_ok=True)
     
     import shutil
     if os.path.exists(image_path):
         shutil.copy(image_path, os.path.join(folder, "captcha.jpg"))
+        
+        # Salva anche metadata con info account
+        metadata = {
+            "timestamp": timestamp,
+            "account_email": EASYHITS_EMAIL,
+            "account_name": ACCOUNT_NAME,
+            "tipo": "matematico_non_riconosciuto"
+        }
+        with open(os.path.join(folder, "metadata.json"), "w") as f:
+            json.dump(metadata, f, indent=2)
+        
         log(f"📁 Captcha matematico salvato in {folder}")
 
 # ================ FUNZIONI DI RICONOSCIMENTO FIGURE ====================
@@ -484,7 +494,7 @@ def crop_safe(img, coords):
     return img[y1:y2, x1:x2]
 
 def salva_errore_figure(qpic, img, picmap, labels, chosen_idx, motivo, urlid=None):
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S%f")[:-3]
     folder = os.path.join(ERRORI_DIR, f"{timestamp}_{qpic}")
     os.makedirs(folder, exist_ok=True)
     
@@ -504,6 +514,8 @@ def salva_errore_figure(qpic, img, picmap, labels, chosen_idx, motivo, urlid=Non
         "motivo": motivo,
         "labels_predette": labels,
         "chosen_idx": chosen_idx,
+        "account_email": EASYHITS_EMAIL,
+        "account_name": ACCOUNT_NAME
     }
     
     with open(os.path.join(folder, "metadata.json"), "w") as f:
@@ -599,17 +611,47 @@ def main():
                         if risultato:
                             a, b = risultato
                             log(f"📊 Numeri rilevati: {a}, {b}")
-                            # TODO: Implementare invio risposta al server
-                            captcha_counter += 1
-                            log(f"✅ OK #{captcha_counter}")
+                            
+                            # Prova somma e moltiplicazione
+                            risolto = False
+                            for op, answer in [('+', a + b), ('×', a * b)]:
+                                log(f"   🎯 Tentativo: {a} {op} {b} = {answer}")
+                                resp = session.get(
+                                    f"https://www.easyhits4u.com/surf/?f=surf&urlid={urlid}&surftype=2"
+                                    f"&ajax=1&answer={answer}&screen_width=1024&screen_height=768",
+                                    verify=False
+                                )
+                                
+                                try:
+                                    resp_data = resp.json()
+                                    if resp_data.get("warning") != "wrong_choice":
+                                        risolto = True
+                                        break
+                                except:
+                                    risolto = True
+                                    break
+                            
+                            if risolto:
+                                captcha_counter += 1
+                                log(f"✅ OK #{captcha_counter}")
+                            else:
+                                log("❌ Nessuna operazione valida")
+                                salva_errore_matematico(temp_path)
+                                log("🛑 FERMO PER ANALISI - Account da cambiare")
+                                return
                         else:
-                            log("❌ Captcha matematico non riconosciuto")
+                            # Non riconosciuto -> ferma tutto
+                            log("❌ Captcha matematico NON RICONOSCIUTO")
+                            salva_errore_matematico(temp_path)
+                            log("🛑 FERMO PER ANALISI - Account da cambiare")
+                            return
                         
-                        # Pulisci
                         safe_remove(temp_path)
                         
                     except Exception as e:
-                        log(f"   ❌ Errore scaricamento: {e}")
+                        log(f"   ❌ Errore: {e}")
+                        salva_errore_matematico(temp_path if 'temp_path' in locals() else None)
+                        return
                     
                     time.sleep(seconds)
                     continue
@@ -635,7 +677,8 @@ def main():
                     if chosen_idx is None:
                         log("❌ Nessun duplicato - Errore riconoscimento")
                         salva_errore_figure(qpic, img, picmap, labels, None, "nessun_duplicato", urlid)
-                        break
+                        log("🛑 FERMO PER ANALISI - Account da cambiare")
+                        return
                     
                     time.sleep(seconds)
                     word = picmap[chosen_idx]["value"]
@@ -648,7 +691,8 @@ def main():
                     if resp.json().get("warning") == "wrong_choice":
                         log("❌ Wrong choice")
                         salva_errore_figure(qpic, img, picmap, labels, chosen_idx, "wrong_choice", urlid)
-                        break
+                        log("🛑 FERMO PER ANALISI - Account da cambiare")
+                        return
                     
                     captcha_counter += 1
                     log(f"✅ OK #{captcha_counter}")
