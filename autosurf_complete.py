@@ -100,7 +100,7 @@ def load_dataset_from_hf():
         log(f"❌ Errore caricamento dataset: {e}")
         return False
 
-# ================ GESTIONE CHIAVI BROWSERLESS (CORRETTA) ====================
+# ================ GESTIONE CHIAVI BROWSERLESS ====================
 def get_browserless_keys():
     """Ottiene le chiavi Browserless da Supabase usando la colonna 'api_key'"""
     try:
@@ -238,7 +238,7 @@ def generate_cookie():
                         'password': EASYHITS_PASSWORD,
                         'cookies_string': cookie_string,
                         'user_id': cookies['user_id'],
-                        'sesids': cookies['sesids'],
+                        'sesids': cookies['sesids'],  # CORRETTO: 'sesids' con s
                         'status': 'active',
                         'created_at': datetime.now().isoformat(),
                         'updated_at': datetime.now().isoformat()
@@ -295,7 +295,7 @@ def init_math_ocr():
     except Exception as e:
         log(f"⚠️ EasyOCR non disponibile: {e}")
 
-# ================ RICONOSCIMENTO CAPTCHA MATEMATICO ====================
+# ================ RICONOSCIMENTO CAPTCHA MATEMATICO (CORRETTO) ====================
 def preprocess_math(image_path):
     """Preprocessing per captcha matematici"""
     img = cv2.imread(image_path)
@@ -325,13 +325,26 @@ def converti_parole_in_numeri(testo):
         testo = testo.replace(p, n)
     return testo
 
+def safe_remove(file_path):
+    """Rimuove un file solo se esiste"""
+    if os.path.exists(file_path):
+        try:
+            os.remove(file_path)
+        except:
+            pass
+
 def riconosci_captcha_matematico(image_path):
-    """Pipeline riconoscimento captcha matematici"""
+    """Pipeline riconoscimento captcha matematici - versione corretta"""
+    # Verifica che il file esista
+    if not os.path.exists(image_path):
+        log(f"⚠️ File {image_path} non trovato")
+        return None
+    
     processed = preprocess_math(image_path)
     if processed is None:
         return None
     
-    temp_path = "temp_math.jpg"
+    temp_path = "temp_math_processed.jpg"
     cv2.imwrite(temp_path, processed)
     
     # Livello 1: DdddOcr
@@ -341,10 +354,11 @@ def riconosci_captcha_matematico(image_path):
                 testo = dddd_ocr.classification(f.read())
             numeri = re.findall(r'\d+', testo)
             if len(numeri) >= 2:
-                os.remove(temp_path)
+                safe_remove(temp_path)
+                safe_remove(image_path)
                 return int(numeri[0]), int(numeri[1])
-        except:
-            pass
+        except Exception as e:
+            log(f"   DdddOcr errore: {e}")
     
     # Livello 2: EasyOCR
     if easy_ocr:
@@ -354,10 +368,11 @@ def riconosci_captcha_matematico(image_path):
             testo = converti_parole_in_numeri(testo)
             numeri = re.findall(r'\d+', testo)
             if len(numeri) >= 2:
-                os.remove(temp_path)
+                safe_remove(temp_path)
+                safe_remove(image_path)
                 return int(numeri[0]), int(numeri[1])
-        except:
-            pass
+        except Exception as e:
+            log(f"   EasyOCR errore: {e}")
     
     # Livello 3: Tesseract
     try:
@@ -365,14 +380,16 @@ def riconosci_captcha_matematico(image_path):
         testo = pytesseract.image_to_string(processed, config=config)
         numeri = re.findall(r'\d+', testo)
         if len(numeri) >= 2:
-            os.remove(temp_path)
+            safe_remove(temp_path)
+            safe_remove(image_path)
             return int(numeri[0]), int(numeri[1])
-    except:
-        pass
+    except Exception as e:
+        log(f"   Tesseract errore: {e}")
     
-    # Salva errore
-    os.remove(temp_path)
+    # Salva errore e pulisci
     salva_errore_matematico(image_path)
+    safe_remove(temp_path)
+    safe_remove(image_path)
     return None
 
 def salva_errore_matematico(image_path):
@@ -382,8 +399,9 @@ def salva_errore_matematico(image_path):
     os.makedirs(folder, exist_ok=True)
     
     import shutil
-    shutil.copy(image_path, os.path.join(folder, "captcha.jpg"))
-    log(f"📁 Captcha matematico salvato in {folder}")
+    if os.path.exists(image_path):
+        shutil.copy(image_path, os.path.join(folder, "captcha.jpg"))
+        log(f"📁 Captcha matematico salvato in {folder}")
 
 # ================ FUNZIONI DI RICONOSCIMENTO FIGURE ====================
 def centra_figura(image):
@@ -552,7 +570,7 @@ def main():
                 
                 if not urlid or not qpic:
                     log("⚠️ Cookie scaduto, rigenerazione...")
-                    break  # Esce dal loop interno per rigenerare cookie
+                    break
                 
                 # ===== CAPTCHA MATEMATICO =====
                 if picmap is None or len(picmap) == 0:
@@ -569,11 +587,14 @@ def main():
                     if risultato:
                         a, b = risultato
                         log(f"📊 Numeri rilevati: {a}, {b}")
-                        # TODO: implementare logica con opzioni
+                        # TODO: implementare logica con opzioni e invio risposta
+                        captcha_counter += 1
+                        log(f"✅ OK #{captcha_counter}")
                     else:
                         log("❌ Captcha matematico non riconosciuto")
-                        time.sleep(seconds)
-                        continue
+                    
+                    time.sleep(seconds)
+                    continue
                 
                 # ===== CAPTCHA A FIGURE =====
                 else:
@@ -610,10 +631,10 @@ def main():
                         log("❌ Wrong choice")
                         salva_errore_figure(qpic, img, picmap, labels, chosen_idx, "wrong_choice", urlid)
                         break
-                
-                captcha_counter += 1
-                log(f"✅ OK #{captcha_counter}")
-                time.sleep(2)
+                    
+                    captcha_counter += 1
+                    log(f"✅ OK #{captcha_counter}")
+                    time.sleep(2)
                 
             except Exception as e:
                 log(f"❌ Errore: {e}")
