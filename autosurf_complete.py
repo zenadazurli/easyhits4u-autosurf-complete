@@ -238,7 +238,7 @@ def generate_cookie():
                         'password': EASYHITS_PASSWORD,
                         'cookies_string': cookie_string,
                         'user_id': cookies['user_id'],
-                        'sesid': cookies['sesids'],
+                        'sesids': cookies['sesids'],
                         'status': 'active',
                         'created_at': datetime.now().isoformat(),
                         'updated_at': datetime.now().isoformat()
