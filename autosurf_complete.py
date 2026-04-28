@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # autosurf_complete.py - Autosurf con supporto figure + captcha matematici
-# Versione: si ferma su captcha non riconosciuti e salva per analisi
+# Versione: si ferma su qualsiasi errore e salva per analisi
 
 import os
 import sys
@@ -278,8 +278,8 @@ def get_cookie_from_supabase():
         log(f"❌ Errore lettura cookie: {e}")
         return None
 
-# ================ INIZIALIZZAZIONE OCR MATEMATICI ====================
-def init_math_ocr():
+# ================ INIZIALIZZAZIONE OCR ====================
+def init_ocr():
     global dddd_ocr, easy_ocr
     
     log("📥 Inizializzazione OCR per captcha matematici...")
@@ -296,9 +296,20 @@ def init_math_ocr():
     except Exception as e:
         log(f"⚠️ EasyOCR non disponibile: {e}")
 
-# ================ RICONOSCIMENTO CAPTCHA MATEMATICO ====================
-def preprocess_math(image_path):
-    """Preprocessing per captcha matematici"""
+# ================ FUNZIONI PER CAPTCHA MATEMATICI ====================
+def converti_numero_in_parole(num):
+    """Converte un numero (1-20) nella parola inglese corrispondente"""
+    parole = {
+        1: "one", 2: "two", 3: "three", 4: "four", 5: "five",
+        6: "six", 7: "seven", 8: "eight", 9: "nine", 10: "ten",
+        11: "eleven", 12: "twelve", 13: "thirteen", 14: "fourteen",
+        15: "fifteen", 16: "sixteen", 17: "seventeen", 18: "eighteen",
+        19: "nineteen", 20: "twenty"
+    }
+    return parole.get(num, str(num))
+
+def preprocess_math_image(image_path):
+    """Preprocessing per immagine captcha matematica"""
     img = cv2.imread(image_path)
     if img is None:
         return None
@@ -312,40 +323,16 @@ def preprocess_math(image_path):
     
     return binary
 
-def converti_parole_in_numeri(testo):
-    """Converte parole numeriche in cifre"""
-    parole = {
-        'zero':'0', 'one':'1', 'two':'2', 'three':'3', 'four':'4',
-        'five':'5', 'six':'6', 'seven':'7', 'eight':'8', 'nine':'9',
-        'ten':'10', 'eleven':'11', 'twelve':'12', 'thirteen':'13',
-        'fourteen':'14', 'fifteen':'15', 'sixteen':'16', 'seventeen':'17',
-        'eighteen':'18', 'nineteen':'19', 'twenty':'20'
-    }
-    testo = testo.lower()
-    for p, n in parole.items():
-        testo = testo.replace(p, n)
-    return testo
-
-def safe_remove(file_path):
-    """Rimuove un file solo se esiste"""
-    if os.path.exists(file_path):
-        try:
-            os.remove(file_path)
-        except:
-            pass
-
-def riconosci_captcha_matematico(image_path):
-    """Pipeline riconoscimento captcha matematici"""
-    if not os.path.exists(image_path):
-        log(f"⚠️ File {image_path} non trovato")
-        return None
-    
-    processed = preprocess_math(image_path)
+def riconosci_operazione_da_immagine(image_path):
+    """Usa OCR multiplo per riconoscere l'operazione matematica"""
+    processed = preprocess_math_image(image_path)
     if processed is None:
-        return None
+        return None, None
     
     temp_path = "temp_math_processed.jpg"
     cv2.imwrite(temp_path, processed)
+    
+    numeri_rilevati = []
     
     # Livello 1: DdddOcr
     if dddd_ocr:
@@ -354,65 +341,124 @@ def riconosci_captcha_matematico(image_path):
                 testo = dddd_ocr.classification(f.read())
             numeri = re.findall(r'\d+', testo)
             if len(numeri) >= 2:
-                safe_remove(temp_path)
-                safe_remove(image_path)
-                return int(numeri[0]), int(numeri[1])
+                numeri_rilevati = [int(n) for n in numeri[:2]]
         except:
             pass
     
-    # Livello 2: EasyOCR
-    if easy_ocr:
+    # Livello 2: EasyOCR (se DdddOcr non ha funzionato)
+    if len(numeri_rilevati) < 2 and easy_ocr:
         try:
             results = easy_ocr.readtext(processed)
             testo = ' '.join([t[1] for t in results if t[2] > 0.5])
-            testo = converti_parole_in_numeri(testo)
             numeri = re.findall(r'\d+', testo)
             if len(numeri) >= 2:
-                safe_remove(temp_path)
-                safe_remove(image_path)
-                return int(numeri[0]), int(numeri[1])
+                numeri_rilevati = [int(n) for n in numeri[:2]]
         except:
             pass
     
     # Livello 3: Tesseract
-    try:
-        config = '--psm 8 -c tessedit_char_whitelist=0123456789+-'
-        testo = pytesseract.image_to_string(processed, config=config)
-        numeri = re.findall(r'\d+', testo)
-        if len(numeri) >= 2:
-            safe_remove(temp_path)
-            safe_remove(image_path)
-            return int(numeri[0]), int(numeri[1])
-    except:
-        pass
+    if len(numeri_rilevati) < 2:
+        try:
+            config = '--psm 8 -c tessedit_char_whitelist=0123456789+'
+            testo = pytesseract.image_to_string(processed, config=config)
+            numeri = re.findall(r'\d+', testo)
+            if len(numeri) >= 2:
+                numeri_rilevati = [int(n) for n in numeri[:2]]
+        except:
+            pass
     
-    # Non riconosciuto - salva errore
-    safe_remove(temp_path)
+    # Pulisci
+    if os.path.exists(temp_path):
+        os.remove(temp_path)
+    
+    if len(numeri_rilevati) >= 2:
+        return numeri_rilevati[0], numeri_rilevati[1]
+    
+    return None, None
+
+def risolvi_captcha_matematico(surfses, image_path):
+    """
+    Risolve il captcha matematico:
+    1. OCR per leggere i due numeri dall'immagine
+    2. Prova somma e differenza
+    3. Verifica quale risultato è tra le opzioni
+    4. Restituisce la parola o None se non certo
+    """
+    opzioni = []
+    a = surfses.get("aword1_number")
+    b = surfses.get("aword2_number")
+    c = surfses.get("aword3_number")
+    
+    if a is not None:
+        opzioni.append(a)
+    if b is not None:
+        opzioni.append(b)
+    if c is not None:
+        opzioni.append(c)
+    
+    log(f"   📊 Opzioni disponibili: {opzioni}")
+    
+    # OCR per leggere i numeri dall'immagine
+    num1, num2 = riconosci_operazione_da_immagine(image_path)
+    
+    if num1 is None or num2 is None:
+        log("   ❌ OCR non ha riconosciuto i numeri")
+        return None
+    
+    log(f"   📝 OCR rilevati: {num1} e {num2}")
+    
+    # Prova somma
+    somma = num1 + num2
+    if somma in opzioni:
+        log(f"   ✅ Somma: {num1} + {num2} = {somma} → nelle opzioni")
+        return converti_numero_in_parole(somma)
+    
+    # Prova differenza (num1 - num2)
+    if num1 > num2:
+        diff1 = num1 - num2
+        if diff1 in opzioni:
+            log(f"   ✅ Differenza: {num1} - {num2} = {diff1} → nelle opzioni")
+            return converti_numero_in_parole(diff1)
+    
+    # Prova differenza (num2 - num1)
+    if num2 > num1:
+        diff2 = num2 - num1
+        if diff2 in opzioni:
+            log(f"   ✅ Differenza: {num2} - {num1} = {diff2} → nelle opzioni")
+            return converti_numero_in_parole(diff2)
+    
+    # Nessuna operazione ha dato un risultato nelle opzioni
+    log(f"   ❌ Nessuna operazione valida: somma={somma}, differenze={num1-num2 if num1>num2 else num2-num1}")
     return None
 
-def salva_errore_matematico(image_path):
+def salva_errore_matematico(surfses, urlid, qpic, image_path=None):
     """Salva captcha matematico non riconosciuto"""
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S%f")[:-3]
     folder = os.path.join(ERRORI_DIR, f"math_{timestamp}")
     os.makedirs(folder, exist_ok=True)
     
-    import shutil
-    if os.path.exists(image_path):
+    # Salva l'immagine se esiste
+    if image_path and os.path.exists(image_path):
+        import shutil
         shutil.copy(image_path, os.path.join(folder, "captcha.jpg"))
-        
-        # Salva anche metadata con info account
-        metadata = {
-            "timestamp": timestamp,
-            "account_email": EASYHITS_EMAIL,
-            "account_name": ACCOUNT_NAME,
-            "tipo": "matematico_non_riconosciuto"
-        }
-        with open(os.path.join(folder, "metadata.json"), "w") as f:
-            json.dump(metadata, f, indent=2)
-        
-        log(f"📁 Captcha matematico salvato in {folder}")
+    
+    # Salva metadata
+    metadata = {
+        "timestamp": timestamp,
+        "urlid": urlid,
+        "qpic": qpic,
+        "surfses": surfses,
+        "account_email": EASYHITS_EMAIL,
+        "account_name": ACCOUNT_NAME,
+        "tipo": "matematico_non_riconosciuto"
+    }
+    
+    with open(os.path.join(folder, "metadata.json"), "w") as f:
+        json.dump(metadata, f, indent=2)
+    
+    log(f"📁 Captcha matematico salvato in {folder}")
 
-# ================ FUNZIONI DI RICONOSCIMENTO FIGURE ====================
+# ================ FUNZIONI PER CAPTCHA FIGURE ====================
 def centra_figura(image):
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
     _, thresh = cv2.threshold(gray, 240, 255, cv2.THRESH_BINARY_INV)
@@ -493,6 +539,36 @@ def crop_safe(img, coords):
         return None
     return img[y1:y2, x1:x2]
 
+def fallback_pixel_compare(crops):
+    """Confronto pixel per pixel come fallback quando il riconoscimento fallisce"""
+    norm = []
+    for c in crops:
+        if c is None or c.size == 0:
+            norm.append(None)
+        else:
+            centered = centra_figura(c)
+            resized = cv2.resize(centered, (DIM, DIM)).astype(np.float32)
+            norm.append(resized)
+
+    best = None
+    min_diff = float("inf")
+    n = len(norm)
+
+    for i in range(n):
+        if norm[i] is None:
+            continue
+        for j in range(i+1, n):
+            if norm[j] is None:
+                continue
+            diff = np.linalg.norm(norm[i].flatten() - norm[j].flatten())
+            if diff < min_diff:
+                min_diff = diff
+                best = (i, j)
+
+    if best and min_diff < 400.0:
+        return min(best)
+    return None
+
 def salva_errore_figure(qpic, img, picmap, labels, chosen_idx, motivo, urlid=None):
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S%f")[:-3]
     folder = os.path.join(ERRORI_DIR, f"{timestamp}_{qpic}")
@@ -537,7 +613,7 @@ def main():
         return
     
     # Inizializza OCR per captcha matematici
-    init_math_ocr()
+    init_ocr()
     
     while True:
         # Ottieni cookie da Supabase
@@ -577,129 +653,134 @@ def main():
                 urlid = data.get("surfses", {}).get("urlid")
                 qpic = data.get("surfses", {}).get("qpic")
                 seconds = int(data.get("surfses", {}).get("seconds", 20))
-                picmap = data.get("picmap", [])
+                picmap = data.get("picmap")
                 
                 if not urlid or not qpic:
                     log("⚠️ Cookie scaduto, rigenerazione...")
                     break
                 
-                # ===== CAPTCHA MATEMATICO =====
-                if picmap is None or len(picmap) == 0:
-                    log("🧮 Captcha matematico rilevato")
+                # ===== DETERMINA IL TIPO DI CAPTCHA =====
+                if picmap is not None and len(picmap) > 0:
+                    # ===== CAPTCHA A FIGURE =====
+                    log("🎯 Captcha a figure rilevato")
                     
-                    try:
-                        # Scarica immagine captcha
-                        img_url = f"https://www.easyhits4u.com/simg/{qpic}.jpg"
-                        img_response = session.get(img_url, verify=False, timeout=30)
-                        
-                        if img_response.status_code != 200:
-                            log(f"   ❌ Download fallito: HTTP {img_response.status_code}")
-                            time.sleep(seconds)
-                            continue
-                        
-                        temp_path = "temp_math.jpg"
-                        with open(temp_path, "wb") as f:
-                            f.write(img_response.content)
-                        
-                        if not os.path.exists(temp_path) or os.path.getsize(temp_path) == 0:
-                            log("   ❌ File non creato o vuoto")
-                            time.sleep(seconds)
-                            continue
-                        
-                        risultato = riconosci_captcha_matematico(temp_path)
-                        
-                        if risultato:
-                            a, b = risultato
-                            log(f"📊 Numeri rilevati: {a}, {b}")
-                            
-                            # Prova somma e moltiplicazione
-                            risolto = False
-                            for op, answer in [('+', a + b), ('×', a * b)]:
-                                log(f"   🎯 Tentativo: {a} {op} {b} = {answer}")
-                                resp = session.get(
-                                    f"https://www.easyhits4u.com/surf/?f=surf&urlid={urlid}&surftype=2"
-                                    f"&ajax=1&answer={answer}&screen_width=1024&screen_height=768",
-                                    verify=False
-                                )
-                                
-                                try:
-                                    resp_data = resp.json()
-                                    if resp_data.get("warning") != "wrong_choice":
-                                        risolto = True
-                                        break
-                                except:
-                                    risolto = True
-                                    break
-                            
-                            if risolto:
-                                captcha_counter += 1
-                                log(f"✅ OK #{captcha_counter}")
-                            else:
-                                log("❌ Nessuna operazione valida")
-                                salva_errore_matematico(temp_path)
-                                log("🛑 FERMO PER ANALISI - Account da cambiare")
-                                return
-                        else:
-                            # Non riconosciuto -> ferma tutto
-                            log("❌ Captcha matematico NON RICONOSCIUTO")
-                            salva_errore_matematico(temp_path)
-                            log("🛑 FERMO PER ANALISI - Account da cambiare")
-                            return
-                        
-                        safe_remove(temp_path)
-                        
-                    except Exception as e:
-                        log(f"   ❌ Errore: {e}")
-                        salva_errore_matematico(temp_path if 'temp_path' in locals() else None)
-                        return
-                    
-                    time.sleep(seconds)
-                    continue
-                
-                # ===== CAPTCHA A FIGURE =====
-                else:
+                    # Scarica immagine
                     img_data = session.get(f"https://www.easyhits4u.com/simg/{qpic}.jpg", verify=False).content
                     img = cv2.imdecode(np.frombuffer(img_data, np.uint8), cv2.IMREAD_COLOR)
                     
+                    # Riconosci ogni figura
                     crops = [crop_safe(img, p.get("coords", "")) for p in picmap]
                     labels = [predict_figure(c) for c in crops]
                     log(f"📋 Labels figure: {labels}")
                     
+                    # Cerca duplicati per label
                     seen = {}
                     chosen_idx = None
                     for i, label in enumerate(labels):
                         if label and label != "errore":
                             if label in seen:
                                 chosen_idx = seen[label]
+                                log(f"🎯 Duplicato via label: '{label}' posizioni {seen[label]} e {i}")
                                 break
                             seen[label] = i
                     
+                    # Fallback: confronto pixel se il riconoscimento label fallisce
                     if chosen_idx is None:
-                        log("❌ Nessun duplicato - Errore riconoscimento")
+                        log("⚠️ Nessun duplicato per label, provo fallback pixel...")
+                        chosen_idx = fallback_pixel_compare(crops)
+                        if chosen_idx is not None:
+                            log(f"🎯 Duplicato via fallback pixel: posizione {chosen_idx}")
+                    
+                    # Se ancora nessun duplicato → ERRORE → FERMA
+                    if chosen_idx is None:
+                        log("❌ Nessun duplicato trovato - Errore riconoscimento")
                         salva_errore_figure(qpic, img, picmap, labels, None, "nessun_duplicato", urlid)
                         log("🛑 FERMO PER ANALISI - Account da cambiare")
                         return
                     
+                    # Attendi e invia risposta
                     time.sleep(seconds)
                     word = picmap[chosen_idx]["value"]
+                    log(f"📤 Invio risposta: word={word}")
+                    
                     resp = session.get(
                         f"https://www.easyhits4u.com/surf/?f=surf&urlid={urlid}&surftype=2"
                         f"&ajax=1&word={word}&screen_width=1024&screen_height=768",
                         verify=False
                     )
                     
-                    if resp.json().get("warning") == "wrong_choice":
-                        log("❌ Wrong choice")
+                    resp_data = resp.json()
+                    warning = resp_data.get("warning")
+                    
+                    if warning == "wrong_choice":
+                        log("❌ Wrong choice - Risposta sbagliata")
                         salva_errore_figure(qpic, img, picmap, labels, chosen_idx, "wrong_choice", urlid)
                         log("🛑 FERMO PER ANALISI - Account da cambiare")
                         return
                     
+                    # Successo!
                     captcha_counter += 1
-                    log(f"✅ OK #{captcha_counter}")
-                    time.sleep(2)
+                    log(f"✅ OK #{captcha_counter} (punteggio: {warning})")
+                    
+                else:
+                    # ===== CAPTCHA MATEMATICO =====
+                    log("🧮 Captcha matematico rilevato")
+                    
+                    surfses = data.get("surfses", {})
+                    
+                    # Scarica l'immagine del captcha
+                    img_data = session.get(f"https://www.easyhits4u.com/simg/{qpic}.jpg", verify=False).content
+                    temp_path = "temp_math.jpg"
+                    with open(temp_path, "wb") as f:
+                        f.write(img_data)
+                    
+                    # Tenta di risolvere
+                    risposta_parola = risolvi_captcha_matematico(surfses, temp_path)
+                    
+                    # Se non si è sicuri (None) → ERRORE → FERMA
+                    if risposta_parola is None:
+                        log("❌ Captcha matematico NON RICONOSCIUTO con certezza")
+                        salva_errore_matematico(surfses, urlid, qpic, temp_path)
+                        if os.path.exists(temp_path):
+                            os.remove(temp_path)
+                        log("🛑 FERMO PER ANALISI - Account da cambiare")
+                        return
+                    
+                    # Attendi e invia risposta
+                    log(f"📤 Invio risposta: word={risposta_parola}")
+                    time.sleep(seconds)
+                    
+                    resp = session.get(
+                        f"https://www.easyhits4u.com/surf/?f=surf&urlid={urlid}&surftype=2"
+                        f"&ajax=1&word={risposta_parola}&screen_width=1024&screen_height=768",
+                        verify=False
+                    )
+                    
+                    resp_data = resp.json()
+                    warning = resp_data.get("warning")
+                    
+                    if warning == "wrong_choice":
+                        log(f"❌ Wrong choice - Risposta '{risposta_parola}' sbagliata")
+                        salva_errore_matematico(surfses, urlid, qpic, temp_path)
+                        if os.path.exists(temp_path):
+                            os.remove(temp_path)
+                        log("🛑 FERMO PER ANALISI - Account da cambiare")
+                        return
+                    
+                    # Successo!
+                    captcha_counter += 1
+                    log(f"✅ OK #{captcha_counter} (punteggio: {warning})")
+                    
+                    # Pulisci
+                    if os.path.exists(temp_path):
+                        os.remove(temp_path)
+                
+                time.sleep(2)
                 
             except Exception as e:
                 log(f"❌ Errore: {e}")
+                import traceback
+                traceback.print_exc()
                 time.sleep(5)
                 break
 
