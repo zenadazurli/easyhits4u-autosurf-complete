@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
-# autosurf_complete.py - Autosurf con supporto figure + captcha matematici
-# Versione con DEBUG preprocessing e upload su Supabase
+# autosurf_complete.py - Autosurf completo per EasyHits4U
+# Supporta: captcha a figure (FAISS) e captcha matematici (RapidOCR/DdddOcr + somma/differenza)
+# I captcha non riconosciuti vengono salvati su Supabase Storage
 
 import os
 import sys
@@ -11,13 +12,13 @@ import cv2
 import json
 import re
 import ddddocr
-import easyocr
 import pytesseract
 from datetime import datetime
 from supabase import create_client
 from datasets import load_dataset
 import urllib3
 
+# Disabilita warning SSL
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # ================ CONFIGURAZIONE ====================
@@ -27,12 +28,12 @@ SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
 BROWSERLESS_SUPABASE_URL = os.environ.get("BROWSERLESS_SUPABASE_URL")
 BROWSERLESS_SUPABASE_KEY = os.environ.get("BROWSERLESS_SUPABASE_KEY")
 
-# Nuovo: Configurazione per Supabase Storage (captcha non risolti)
+# Storage per captcha non risolti
 MATH_SUPABASE_URL = os.environ.get("MATH_SUPABASE_URL")
 MATH_SUPABASE_KEY = os.environ.get("MATH_SUPABASE_KEY")
 
-EASYHITS_EMAIL = os.environ.get("EASYHITS_EMAIL", "sandrominori50+uujkrczveemscvo@gmail.com")
-EASYHITS_PASSWORD = os.environ.get("EASYHITS_PASSWORD", "DDnmVV45!!")
+EASYHITS_EMAIL = os.environ.get("EASYHITS_EMAIL")
+EASYHITS_PASSWORD = os.environ.get("EASYHITS_PASSWORD")
 ACCOUNT_NAME = os.environ.get("ACCOUNT_NAME", "main")
 REFERER_URL = "https://www.easyhits4u.com/?ref=nicolacaporale"
 BROWSERLESS_URL = "https://production-sfo.browserless.io/chrome/bql"
@@ -49,10 +50,33 @@ X_fast = None
 y_fast = None
 classes_fast = None
 current_cookie_string = None
-
-# OCR per captcha matematici
 dddd_ocr = None
-easy_ocr = None
+rapid_ocr = None
+
+# ================ MAPPATURA PAROLE -> NUMERI ====================
+WORD_TO_NUM = {
+    'zero': 0, 'one': 1, 'two': 2, 'three': 3, 'four': 4,
+    'five': 5, 'six': 6, 'seven': 7, 'eight': 8, 'nine': 9,
+    'ten': 10, 'eleven': 11, 'twelve': 12, 'thirteen': 13,
+    'fourteen': 14, 'fifteen': 15, 'sixteen': 16, 'seventeen': 17,
+    'eighteen': 18, 'nineteen': 19, 'twenty': 20,
+    'twentyone': 21, 'twentytwo': 22, 'twentythree': 23, 'twentyfour': 24, 'twentyfive': 25,
+    'twentysix': 26, 'twentyseven': 27, 'twentyeight': 28, 'twentynine': 29,
+    'thirty': 30, 'thirtyone': 31, 'thirtytwo': 32, 'thirtythree': 33, 'thirtyfour': 34,
+    'thirtyfive': 35, 'thirtysix': 36, 'thirtyseven': 37, 'thirtyeight': 38, 'thirtynine': 39,
+    'forty': 40, 'fortyone': 41, 'fortytwo': 42, 'fortythree': 43, 'fortyfour': 44,
+    'fortyfive': 45, 'fortysix': 46, 'fortyseven': 47, 'fortyeight': 48, 'fortynine': 49,
+    'fifty': 50
+}
+
+NUM_TO_WORD = {v: k for k, v in WORD_TO_NUM.items()}
+NUM_TO_WORD.update({
+    0: 'zero', 1: 'one', 2: 'two', 3: 'three', 4: 'four',
+    5: 'five', 6: 'six', 7: 'seven', 8: 'eight', 9: 'nine',
+    10: 'ten', 11: 'eleven', 12: 'twelve', 13: 'thirteen',
+    14: 'fourteen', 15: 'fifteen', 16: 'sixteen', 17: 'seventeen',
+    18: 'eighteen', 19: 'nineteen', 20: 'twenty'
+})
 
 # ================ LOG ====================
 def log(msg):
@@ -107,7 +131,6 @@ def load_dataset_from_hf():
 
 # ================ GESTIONE CHIAVI BROWSERLESS ====================
 def get_browserless_keys():
-    """Ottiene le chiavi Browserless da Supabase usando la colonna 'api_key'"""
     try:
         supabase = create_client(BROWSERLESS_SUPABASE_URL, BROWSERLESS_SUPABASE_KEY)
         resp = supabase.table('browserless_keys')\
@@ -123,7 +146,6 @@ def get_browserless_keys():
         return []
 
 def get_cf_token(api_key):
-    """Ottiene il token Cloudflare usando Browserless"""
     query = """
     mutation {
       goto(url: "https://www.easyhits4u.com/logon/", waitUntil: networkIdle, timeout: 60000) {
@@ -156,7 +178,6 @@ def get_cf_token(api_key):
         return None
 
 def generate_cookie():
-    """Genera un nuovo cookie usando Browserless"""
     log("🔄 Generazione nuovo cookie...")
     
     keys = get_browserless_keys()
@@ -179,16 +200,13 @@ def generate_cookie():
         }
         
         try:
-            # GET homepage
             session.get("https://www.easyhits4u.com/", headers=headers, verify=False, timeout=15)
             time.sleep(1)
             
-            # Token Cloudflare
             token = get_cf_token(api_key)
             if not token:
                 continue
             
-            # POST login
             login_headers = headers.copy()
             login_headers['Content-Type'] = 'application/x-www-form-urlencoded'
             login_headers['Referer'] = REFERER_URL
@@ -207,16 +225,10 @@ def generate_cookie():
                 continue
             
             time.sleep(2)
-            
-            # GET /member/
             session.get("https://www.easyhits4u.com/member/", headers=headers, verify=False, timeout=15)
             time.sleep(1)
-            
-            # GET /surf/
             session.get("https://www.easyhits4u.com/surf/", headers=headers, verify=False, timeout=15)
             time.sleep(1)
-            
-            # GET referer
             session.get(REFERER_URL, headers=headers, verify=False, timeout=15)
             
             cookies = session.cookies.get_dict()
@@ -225,18 +237,15 @@ def generate_cookie():
                 cookie_string = '; '.join([f"{k}={v}" for k, v in cookies.items()])
                 log(f"✅ Cookie generato! user_id={cookies['user_id']}, sesids={cookies['sesids']}")
                 
-                # Salva su Supabase
                 try:
                     supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
                     
-                    # Disattiva vecchi cookie
                     supabase.table('account_cookies')\
                         .update({'status': 'expired'})\
                         .eq('account_name', ACCOUNT_NAME)\
                         .eq('status', 'active')\
                         .execute()
                     
-                    # Salva nuovo cookie
                     cookie_data = {
                         'account_name': ACCOUNT_NAME,
                         'email': EASYHITS_EMAIL,
@@ -251,12 +260,10 @@ def generate_cookie():
                     
                     supabase.table('account_cookies').insert(cookie_data).execute()
                     log("💾 Cookie salvato su Supabase")
-                    
                 except Exception as e:
                     log(f"⚠️ Errore salvataggio Supabase: {e}")
                 
                 return cookie_string
-                
         except Exception as e:
             log(f"   ❌ Errore: {e}")
             continue
@@ -264,7 +271,6 @@ def generate_cookie():
     log("❌ Impossibile generare cookie")
     return None
 
-# ================ LEGGI COOKIE DA SUPABASE ====================
 def get_cookie_from_supabase():
     try:
         supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
@@ -284,215 +290,110 @@ def get_cookie_from_supabase():
 
 # ================ INIZIALIZZAZIONE OCR ====================
 def init_ocr():
-    global dddd_ocr, easy_ocr
+    global dddd_ocr, rapid_ocr
     
-    log("📥 Inizializzazione OCR per captcha matematici...")
+    log("📥 Inizializzazione OCR...")
+    
+    # DdddOcr (veloce per cifre e operatori)
     try:
         dddd_ocr = ddddocr.DdddOcr()
-        dddd_ocr.set_ranges("0123456789+-")
+        dddd_ocr.set_ranges("0123456789+-abcdefghijklmnopqrstuvwxyz")
         log("✅ DdddOcr pronto")
     except Exception as e:
         log(f"⚠️ DdddOcr non disponibile: {e}")
+        dddd_ocr = None
     
+    # RapidOCR (più potente per parole inglesi)
     try:
-        easy_ocr = easyocr.Reader(['en'], gpu=False)
-        log("✅ EasyOCR pronto")
+        from rapidocr_onnxruntime import RapidOCR
+        rapid_ocr = RapidOCR()
+        log("✅ RapidOCR pronto")
+    except ImportError:
+        log("⚠️ RapidOCR non installato (opzionale)")
+        rapid_ocr = None
     except Exception as e:
-        log(f"⚠️ EasyOCR non disponibile: {e}")
+        log(f"⚠️ Errore RapidOCR: {e}")
+        rapid_ocr = None
 
 # ================ FUNZIONI PER CAPTCHA MATEMATICI ====================
+def converti_testo_in_numeri(testo):
+    """Converte testo OCR in lista di numeri (supporta parole inglesi)"""
+    if not testo:
+        return []
+    
+    testo_conv = testo.lower()
+    
+    # Sostituisci parole con numeri (dalla più lunga alla più corta)
+    for word in sorted(WORD_TO_NUM.keys(), key=len, reverse=True):
+        if word in testo_conv:
+            testo_conv = testo_conv.replace(word, str(WORD_TO_NUM[word]))
+    
+    # Estrai numeri
+    numeri = re.findall(r'\d+', testo_conv)
+    return [int(n) for n in numeri]
+
 def converti_numero_in_parole(num):
-    """Converte un numero (1-20) nella parola inglese corrispondente"""
-    parole = {
-        1: "one", 2: "two", 3: "three", 4: "four", 5: "five",
-        6: "six", 7: "seven", 8: "eight", 9: "nine", 10: "ten",
-        11: "eleven", 12: "twelve", 13: "thirteen", 14: "fourteen",
-        15: "fifteen", 16: "sixteen", 17: "seventeen", 18: "eighteen",
-        19: "nineteen", 20: "twenty"
-    }
-    return parole.get(num, str(num))
+    """Converte un numero nella parola inglese corrispondente"""
+    if num in NUM_TO_WORD:
+        return NUM_TO_WORD[num]
+    
+    # Per numeri > 20 (es. 25 -> twentyfive)
+    if 21 <= num <= 99:
+        tens = num // 10
+        ones = num % 10
+        tens_words = {2: 'twenty', 3: 'thirty', 4: 'forty', 5: 'fifty'}
+        if ones == 0:
+            return tens_words.get(tens, str(num))
+        else:
+            ones_word = NUM_TO_WORD.get(ones, str(ones))
+            return f"{tens_words.get(tens, '')}{ones_word}"
+    
+    return str(num)
 
-def converti_parole_in_numeri(testo):
-    """Converte parole numeriche inglesi in cifre"""
-    parole = {
-        'zero': '0', 'one': '1', 'two': '2', 'three': '3', 'four': '4',
-        'five': '5', 'six': '6', 'seven': '7', 'eight': '8', 'nine': '9',
-        'ten': '10', 'eleven': '11', 'twelve': '12', 'thirteen': '13',
-        'fourteen': '14', 'fifteen': '15', 'sixteen': '16', 'seventeen': '17',
-        'eighteen': '18', 'nineteen': '19', 'twenty': '20'
-    }
-    testo = testo.lower()
-    for parola, numero in parole.items():
-        testo = testo.replace(parola, numero)
-    return testo
-
-def upload_debug_to_supabase(local_path, remote_path):
-    """Carica file di debug su Supabase Storage"""
-    try:
-        if not MATH_SUPABASE_URL or not MATH_SUPABASE_KEY:
-            return
-        
-        supabase_math = create_client(MATH_SUPABASE_URL, MATH_SUPABASE_KEY)
-        
-        with open(local_path, "rb") as f:
-            file_data = f.read()
-        
-        supabase_math.storage.from_("math-captchas").upload(
-            remote_path,
-            file_data,
-            {"content-type": "image/jpeg"}
-        )
-        log(f"   🔍 Debug upload: {remote_path}")
-    except Exception as e:
-        log(f"   ⚠️ Errore upload debug: {e}")
-
-def preprocess_math_image(image_path):
-    """Preprocessing per immagine captcha matematica con DEBUG e UPLOAD"""
-    img = cv2.imread(image_path)
-    if img is None:
-        log(f"   ❌ Impossibile leggere: {image_path}")
-        return None
+def riconosci_testo_da_immagine(image_path):
+    """Usa RapidOCR (primary) o DdddOcr (fallback) per riconoscere il testo"""
     
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S%f")[:-3]
-    debug_folder = f"debug_{timestamp}"
+    # Prova RapidOCR prima (più potente)
+    if rapid_ocr:
+        try:
+            img_array = cv2.imread(image_path)
+            result, _ = rapid_ocr(img_array)
+            
+            if result and len(result) > 0:
+                testo = ' '.join([item[1] for item in result])
+                if testo:
+                    log(f"   📝 RapidOCR: '{testo}'")
+                    return testo
+        except Exception as e:
+            log(f"   ⚠️ RapidOCR errore: {e}")
     
-    # Salva originale
-    cv2.imwrite("debug_original.jpg", img)
-    upload_debug_to_supabase("debug_original.jpg", f"{debug_folder}/0_original.jpg")
-    
-    # Denoise
-    denoised = cv2.fastNlMeansDenoisingColored(img, None, 15, 15, 7, 21)
-    cv2.imwrite("debug_denoised.jpg", denoised)
-    upload_debug_to_supabase("debug_denoised.jpg", f"{debug_folder}/1_denoised.jpg")
-    
-    # Gray
-    gray = cv2.cvtColor(denoised, cv2.COLOR_BGR2GRAY)
-    cv2.imwrite("debug_gray.jpg", gray)
-    upload_debug_to_supabase("debug_gray.jpg", f"{debug_folder}/2_gray.jpg")
-    
-    # Binarizzazione OTSU
-    _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-    cv2.imwrite("debug_binary_otsu.jpg", binary)
-    upload_debug_to_supabase("debug_binary_otsu.jpg", f"{debug_folder}/3_binary_otsu.jpg")
-    
-    # Inverti se necessario
-    if np.mean(binary) > 127:
-        binary = cv2.bitwise_not(binary)
-        cv2.imwrite("debug_binary_inverted.jpg", binary)
-        upload_debug_to_supabase("debug_binary_inverted.jpg", f"{debug_folder}/4_binary_inverted.jpg")
-    
-    log(f"   🔍 Immagini debug caricate su Supabase in cartella: {debug_folder}")
-    
-    # Pulisci file locali
-    for f in ["debug_original.jpg", "debug_denoised.jpg", "debug_gray.jpg", 
-              "debug_binary_otsu.jpg", "debug_binary_inverted.jpg"]:
-        if os.path.exists(f):
-            os.remove(f)
-    
-    return binary
-
-def riconosci_operazione_da_immagine(image_path):
-    """Usa OCR multiplo per riconoscere l'operazione matematica"""
-    processed = preprocess_math_image(image_path)
-    if processed is None:
-        return None, None, None
-    
-    temp_path = "temp_math_processed.png"
-    cv2.imwrite(temp_path, processed)
-    
-    # Livello 1: DdddOcr
+    # Fallback a DdddOcr
     if dddd_ocr:
         try:
-            with open(temp_path, "rb") as f:
+            with open(image_path, "rb") as f:
                 img_bytes = f.read()
             
             testo = dddd_ocr.classification(img_bytes)
-            log(f"   📝 DdddOcr -> '{testo}'")
-            
             if testo:
-                # Cerca pattern come "5+2" o "5 + 2"
-                match = re.search(r'(\d+)\s*([+\-])\s*(\d+)', testo)
-                if match:
-                    num1 = int(match.group(1))
-                    operatore = match.group(2)
-                    num2 = int(match.group(3))
-                    os.remove(temp_path)
-                    return num1, num2, operatore
-                
-                # Fallback: estrai solo numeri
-                numeri = re.findall(r'\d+', testo)
-                if len(numeri) >= 2:
-                    os.remove(temp_path)
-                    return int(numeri[0]), int(numeri[1]), None
+                log(f"   📝 DdddOcr: '{testo}'")
+                return testo
         except Exception as e:
             log(f"   ⚠️ DdddOcr errore: {e}")
     
-    # Livello 2: EasyOCR
-    if easy_ocr:
-        try:
-            results = easy_ocr.readtext(processed)
-            testo = ' '.join([t[1] for t in results if t[2] > 0.5])
-            log(f"   📝 EasyOCR -> '{testo}'")
-            
-            # Converti parole in numeri
-            testo = converti_parole_in_numeri(testo)
-            
-            match = re.search(r'(\d+)\s*([+\-])\s*(\d+)', testo)
-            if match:
-                num1 = int(match.group(1))
-                operatore = match.group(2)
-                num2 = int(match.group(3))
-                os.remove(temp_path)
-                return num1, num2, operatore
-            
-            numeri = re.findall(r'\d+', testo)
-            if len(numeri) >= 2:
-                os.remove(temp_path)
-                return int(numeri[0]), int(numeri[1]), None
-        except Exception as e:
-            log(f"   ⚠️ EasyOCR errore: {e}")
-    
-    # Livello 3: Tesseract
-    try:
-        config = '--psm 8 -c tessedit_char_whitelist=0123456789+-'
-        testo = pytesseract.image_to_string(processed, config=config)
-        log(f"   📝 Tesseract -> '{testo}'")
-        
-        testo = converti_parole_in_numeri(testo)
-        match = re.search(r'(\d+)\s*([+\-])\s*(\d+)', testo)
-        if match:
-            num1 = int(match.group(1))
-            operatore = match.group(2)
-            num2 = int(match.group(3))
-            os.remove(temp_path)
-            return num1, num2, operatore
-        
-        numeri = re.findall(r'\d+', testo)
-        if len(numeri) >= 2:
-            os.remove(temp_path)
-            return int(numeri[0]), int(numeri[1]), None
-    except Exception as e:
-        log(f"   ⚠️ Tesseract errore: {e}")
-    
-    os.remove(temp_path)
-    return None, None, None
+    return None
 
 def upload_captcha_to_supabase(image_path, surfses, urlid, qpic):
-    """Upload captcha matematico non risolto su Supabase Storage"""
+    """Upload captcha non riconosciuto su Supabase Storage"""
     try:
         if not MATH_SUPABASE_URL or not MATH_SUPABASE_KEY:
-            log("⚠️ MATH_SUPABASE_URL o MATH_SUPABASE_KEY non impostate")
             return False
         
         supabase_math = create_client(MATH_SUPABASE_URL, MATH_SUPABASE_KEY)
-        
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S%f")[:-3]
         
-        # Leggi immagine
         with open(image_path, "rb") as f:
             file_data = f.read()
         
-        # Upload su bucket
         file_path = f"{timestamp}/captcha.jpg"
         supabase_math.storage.from_("math-captchas").upload(
             file_path,
@@ -502,7 +403,6 @@ def upload_captcha_to_supabase(image_path, surfses, urlid, qpic):
         
         log(f"📤 Captcha caricato su Supabase: {file_path}")
         return True
-        
     except Exception as e:
         log(f"⚠️ Errore upload: {e}")
         return False
@@ -517,8 +417,6 @@ def salva_errore_matematico(surfses, urlid, qpic, image_path=None):
         import shutil
         dest_path = os.path.join(folder, "captcha.jpg")
         shutil.copy(image_path, dest_path)
-        
-        # Upload su Supabase Storage
         upload_captcha_to_supabase(dest_path, surfses, urlid, qpic)
     
     metadata = {
@@ -533,72 +431,62 @@ def salva_errore_matematico(surfses, urlid, qpic, image_path=None):
     with open(os.path.join(folder, "metadata.json"), "w") as f:
         json.dump(metadata, f, indent=2)
     
-    log(f"📁 Captcha matematico salvato in {folder}")
+    log(f"📁 Captcha salvato in {folder}")
 
 def risolvi_captcha_matematico(surfses, image_path):
     """
     Risolve il captcha matematico:
-    1. OCR per leggere i due numeri dall'immagine
-    2. Prova somma e differenza
-    3. Verifica quale risultato è tra le opzioni
-    4. Restituisce la parola o None se non certo
+    1. OCR per estrarre testo (RapidOCR primario, DdddOcr fallback)
+    2. Estrae numeri dal testo
+    3. Prova somma e differenza
+    4. Confronta con le opzioni del server
     """
-    opzioni = []
-    a = surfses.get("aword1_number")
-    b = surfses.get("aword2_number")
-    c = surfses.get("aword3_number")
+    # Opzioni dal server
+    opzioni = [
+        surfses.get("aword1_number"),
+        surfses.get("aword2_number"),
+        surfses.get("aword3_number")
+    ]
+    opzioni = [x for x in opzioni if x is not None]
     
-    if a is not None:
-        opzioni.append(a)
-    if b is not None:
-        opzioni.append(b)
-    if c is not None:
-        opzioni.append(c)
-    
-    log(f"   📊 Opzioni disponibili: {opzioni}")
-    
-    # OCR per leggere i numeri dall'immagine
-    num1, num2, operatore = riconosci_operazione_da_immagine(image_path)
-    
-    if num1 is None or num2 is None:
-        log("   ❌ OCR non ha riconosciuto i numeri")
+    if not opzioni:
+        log("   ❌ Nessuna opzione dal server")
         return None
     
-    log(f"   📝 OCR rilevati: {num1} e {num2}, operatore: {operatore}")
+    log(f"   📊 Opzioni server: {opzioni}")
     
-    # Se abbiamo l'operatore, usalo
-    if operatore == '+':
-        risultato = num1 + num2
-        if risultato in opzioni:
-            log(f"   ✅ {num1} + {num2} = {risultato} → nelle opzioni")
-            return converti_numero_in_parole(risultato)
-    elif operatore == '-':
-        risultato = num1 - num2
-        if risultato in opzioni:
-            log(f"   ✅ {num1} - {num2} = {risultato} → nelle opzioni")
-            return converti_numero_in_parole(risultato)
+    # OCR per riconoscere il testo
+    testo_ocr = riconosci_testo_da_immagine(image_path)
+    
+    if not testo_ocr:
+        log("   ❌ OCR non ha riconosciuto nulla")
+        return None
+    
+    # Estrai numeri dal testo
+    numeri = converti_testo_in_numeri(testo_ocr)
+    
+    if len(numeri) < 2:
+        log(f"   ❌ OCR ha riconosciuto solo {len(numeri)} numeri: {numeri}")
+        return None
+    
+    num1, num2 = numeri[0], numeri[1]
+    log(f"   📊 Numeri OCR: {num1}, {num2}")
     
     # Prova somma
     somma = num1 + num2
     if somma in opzioni:
-        log(f"   ✅ Somma: {num1} + {num2} = {somma} → nelle opzioni")
+        log(f"   ✅ Somma: {num1} + {num2} = {somma}")
         return converti_numero_in_parole(somma)
     
-    # Prova differenza (num1 - num2)
-    if num1 > num2:
-        diff1 = num1 - num2
-        if diff1 in opzioni:
-            log(f"   ✅ Differenza: {num1} - {num2} = {diff1} → nelle opzioni")
-            return converti_numero_in_parole(diff1)
+    # Prova differenza (valore assoluto)
+    diff = abs(num1 - num2)
+    if diff in opzioni:
+        log(f"   ✅ Differenza: {max(num1,num2)} - {min(num1,num2)} = {diff}")
+        return converti_numero_in_parole(diff)
     
-    # Prova differenza (num2 - num1)
-    if num2 > num1:
-        diff2 = num2 - num1
-        if diff2 in opzioni:
-            log(f"   ✅ Differenza: {num2} - {num1} = {diff2} → nelle opzioni")
-            return converti_numero_in_parole(diff2)
-    
-    log(f"   ❌ Nessuna operazione valida: somma={somma}")
+    # Nessuna corrispondenza
+    log(f"   ❌ Nessuna operazione corrisponde alle opzioni")
+    log(f"      Somma={somma}, Differenza={diff}")
     return None
 
 # ================ FUNZIONI PER CAPTCHA FIGURE ====================
@@ -683,7 +571,7 @@ def crop_safe(img, coords):
     return img[y1:y2, x1:x2]
 
 def fallback_pixel_compare(crops):
-    """Confronto pixel per pixel come fallback quando il riconoscimento fallisce"""
+    """Confronto pixel per pixel come fallback"""
     norm = []
     for c in crops:
         if c is None or c.size == 0:
@@ -755,7 +643,7 @@ def main():
         log("❌ Impossibile proseguire senza dataset figure")
         return
     
-    # Inizializza OCR per captcha matematici
+    # Inizializza OCR
     init_ocr()
     
     while True:
@@ -833,7 +721,7 @@ def main():
                     if chosen_idx is None:
                         log("❌ Nessun duplicato trovato - Errore riconoscimento")
                         salva_errore_figure(qpic, img, picmap, labels, None, "nessun_duplicato", urlid)
-                        log("🛑 FERMO PER ANALISI - Account da cambiare")
+                        log("🛑 FERMO PER ANALISI")
                         return
                     
                     time.sleep(seconds)
@@ -852,7 +740,7 @@ def main():
                     if warning == "wrong_choice":
                         log("❌ Wrong choice - Risposta sbagliata")
                         salva_errore_figure(qpic, img, picmap, labels, chosen_idx, "wrong_choice", urlid)
-                        log("🛑 FERMO PER ANALISI - Account da cambiare")
+                        log("🛑 FERMO PER ANALISI")
                         return
                     
                     captcha_counter += 1
@@ -873,11 +761,11 @@ def main():
                     risposta_parola = risolvi_captcha_matematico(surfses, temp_path)
                     
                     if risposta_parola is None:
-                        log("❌ Captcha matematico NON RICONOSCIUTO con certezza")
+                        log("❌ Captcha matematico NON RICONOSCIUTO")
                         salva_errore_matematico(surfses, urlid, qpic, temp_path)
                         if os.path.exists(temp_path):
                             os.remove(temp_path)
-                        log("🛑 FERMO PER ANALISI - Account da cambiare")
+                        log("🛑 FERMO PER ANALISI")
                         return
                     
                     log(f"📤 Invio risposta: word={risposta_parola}")
@@ -897,7 +785,7 @@ def main():
                         salva_errore_matematico(surfses, urlid, qpic, temp_path)
                         if os.path.exists(temp_path):
                             os.remove(temp_path)
-                        log("🛑 FERMO PER ANALISI - Account da cambiare")
+                        log("🛑 FERMO PER ANALISI")
                         return
                     
                     captcha_counter += 1
