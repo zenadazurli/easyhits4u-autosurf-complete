@@ -372,9 +372,6 @@ def riconosci_testo_da_immagine(image_path):
     if processed is None:
         return None
     
-    # Salva per debug
-    cv2.imwrite("debug_processed.jpg", processed)
-    
     # Prova con RapidOCR
     if rapid_ocr:
         try:
@@ -747,4 +744,60 @@ def main():
                     log(f"✅ OK #{captcha_counter} (punteggio: {warning})")
                     
                 else:
-                    # CAP
+                    # CAPTCHA MATEMATICO
+                    log("🧮 Captcha matematico rilevato")
+                    
+                    surfses = data.get("surfses", {})
+                    
+                    img_data = session.get(f"https://www.easyhits4u.com/simg/{qpic}.jpg", verify=False).content
+                    temp_path = "temp_math.jpg"
+                    with open(temp_path, "wb") as f:
+                        f.write(img_data)
+                    
+                    risposta_parola = risolvi_captcha_matematico(surfses, temp_path)
+                    
+                    if risposta_parola is None:
+                        log("❌ Captcha matematico NON RICONOSCIUTO")
+                        salva_errore_matematico(surfses, urlid, qpic, temp_path)
+                        if os.path.exists(temp_path):
+                            os.remove(temp_path)
+                        log("🛑 FERMO PER ANALISI")
+                        return
+                    
+                    log(f"📤 Invio risposta: word={risposta_parola}")
+                    time.sleep(seconds)
+                    
+                    resp = session.get(
+                        f"https://www.easyhits4u.com/surf/?f=surf&urlid={urlid}&surftype=2"
+                        f"&ajax=1&word={risposta_parola}&screen_width=1024&screen_height=768",
+                        verify=False
+                    )
+                    
+                    resp_data = resp.json()
+                    warning = resp_data.get("warning")
+                    
+                    if warning == "wrong_choice":
+                        log(f"❌ Wrong choice - '{risposta_parola}' sbagliata")
+                        salva_errore_matematico(surfses, urlid, qpic, temp_path)
+                        if os.path.exists(temp_path):
+                            os.remove(temp_path)
+                        log("🛑 FERMO PER ANALISI")
+                        return
+                    
+                    captcha_counter += 1
+                    log(f"✅ OK #{captcha_counter} (punteggio: {warning})")
+                    
+                    if os.path.exists(temp_path):
+                        os.remove(temp_path)
+                
+                time.sleep(2)
+                
+            except Exception as e:
+                log(f"❌ Errore: {e}")
+                import traceback
+                traceback.print_exc()
+                time.sleep(5)
+                break
+
+if __name__ == "__main__":
+    main()
