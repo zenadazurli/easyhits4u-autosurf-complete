@@ -10,11 +10,10 @@ ddddocr>=1.4.0
 pytesseract>=0.3.10
 pillow>=10.0.0
 
-# EasyOCR e dipendenze - Python 3.11 compatibili
-torch>=2.0.0,<2.6.0
-torchvision>=0.15.0
-easyocr>=1.7.0
+# RapidOCR (leggero e potente)
+rapidocr-onnxruntime>=1.3.0
 
-# RapidOCR (alternativa più leggera e potente)
-rapidocr>=3.0.0
-onnxruntime
+# EasyOCR (opzionale, commenta se non serve)
+# torch>=2.0.0,<2.6.0
+# torchvision>=0.15.0
+# easyocr>=1.7.0
