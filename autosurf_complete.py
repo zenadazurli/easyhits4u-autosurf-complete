@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # autosurf_complete.py - Autosurf con supporto figure + captcha matematici
-# Versione con upload captcha non risolti su Supabase Storage
+# Versione con DEBUG preprocessing e upload su Supabase
 
 import os
 import sys
@@ -27,7 +27,7 @@ SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
 BROWSERLESS_SUPABASE_URL = os.environ.get("BROWSERLESS_SUPABASE_URL")
 BROWSERLESS_SUPABASE_KEY = os.environ.get("BROWSERLESS_SUPABASE_KEY")
 
-# NUOVO: Configurazione per Supabase Storage (captcha non risolti)
+# Nuovo: Configurazione per Supabase Storage (captcha non risolti)
 MATH_SUPABASE_URL = os.environ.get("MATH_SUPABASE_URL")
 MATH_SUPABASE_KEY = os.environ.get("MATH_SUPABASE_KEY")
 
@@ -312,18 +312,82 @@ def converti_numero_in_parole(num):
     }
     return parole.get(num, str(num))
 
+def converti_parole_in_numeri(testo):
+    """Converte parole numeriche inglesi in cifre"""
+    parole = {
+        'zero': '0', 'one': '1', 'two': '2', 'three': '3', 'four': '4',
+        'five': '5', 'six': '6', 'seven': '7', 'eight': '8', 'nine': '9',
+        'ten': '10', 'eleven': '11', 'twelve': '12', 'thirteen': '13',
+        'fourteen': '14', 'fifteen': '15', 'sixteen': '16', 'seventeen': '17',
+        'eighteen': '18', 'nineteen': '19', 'twenty': '20'
+    }
+    testo = testo.lower()
+    for parola, numero in parole.items():
+        testo = testo.replace(parola, numero)
+    return testo
+
+def upload_debug_to_supabase(local_path, remote_path):
+    """Carica file di debug su Supabase Storage"""
+    try:
+        if not MATH_SUPABASE_URL or not MATH_SUPABASE_KEY:
+            return
+        
+        supabase_math = create_client(MATH_SUPABASE_URL, MATH_SUPABASE_KEY)
+        
+        with open(local_path, "rb") as f:
+            file_data = f.read()
+        
+        supabase_math.storage.from_("math-captchas").upload(
+            remote_path,
+            file_data,
+            {"content-type": "image/jpeg"}
+        )
+        log(f"   🔍 Debug upload: {remote_path}")
+    except Exception as e:
+        log(f"   ⚠️ Errore upload debug: {e}")
+
 def preprocess_math_image(image_path):
-    """Preprocessing per immagine captcha matematica"""
+    """Preprocessing per immagine captcha matematica con DEBUG e UPLOAD"""
     img = cv2.imread(image_path)
     if img is None:
+        log(f"   ❌ Impossibile leggere: {image_path}")
         return None
     
-    denoised = cv2.fastNlMeansDenoisingColored(img, None, 15, 15, 7, 21)
-    gray = cv2.cvtColor(denoised, cv2.COLOR_BGR2GRAY)
-    _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S%f")[:-3]
+    debug_folder = f"debug_{timestamp}"
     
+    # Salva originale
+    cv2.imwrite("debug_original.jpg", img)
+    upload_debug_to_supabase("debug_original.jpg", f"{debug_folder}/0_original.jpg")
+    
+    # Denoise
+    denoised = cv2.fastNlMeansDenoisingColored(img, None, 15, 15, 7, 21)
+    cv2.imwrite("debug_denoised.jpg", denoised)
+    upload_debug_to_supabase("debug_denoised.jpg", f"{debug_folder}/1_denoised.jpg")
+    
+    # Gray
+    gray = cv2.cvtColor(denoised, cv2.COLOR_BGR2GRAY)
+    cv2.imwrite("debug_gray.jpg", gray)
+    upload_debug_to_supabase("debug_gray.jpg", f"{debug_folder}/2_gray.jpg")
+    
+    # Binarizzazione OTSU
+    _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    cv2.imwrite("debug_binary_otsu.jpg", binary)
+    upload_debug_to_supabase("debug_binary_otsu.jpg", f"{debug_folder}/3_binary_otsu.jpg")
+    
+    # Inverti se necessario
     if np.mean(binary) > 127:
         binary = cv2.bitwise_not(binary)
+        cv2.imwrite("debug_binary_inverted.jpg", binary)
+        upload_debug_to_supabase("debug_binary_inverted.jpg", f"{debug_folder}/4_binary_inverted.jpg")
+    
+    log(f"   🔍 Immagini debug caricate su Supabase in cartella: {debug_folder}")
+    
+    # Pulisci file locali
+    for f in ["debug_original.jpg", "debug_denoised.jpg", "debug_gray.jpg", 
+              "debug_binary_otsu.jpg", "debug_binary_inverted.jpg"]:
+        if os.path.exists(f):
+            os.remove(f)
     
     return binary
 
@@ -331,54 +395,87 @@ def riconosci_operazione_da_immagine(image_path):
     """Usa OCR multiplo per riconoscere l'operazione matematica"""
     processed = preprocess_math_image(image_path)
     if processed is None:
-        return None, None
+        return None, None, None
     
-    temp_path = "temp_math_processed.jpg"
+    temp_path = "temp_math_processed.png"
     cv2.imwrite(temp_path, processed)
-    
-    numeri_rilevati = []
     
     # Livello 1: DdddOcr
     if dddd_ocr:
         try:
             with open(temp_path, "rb") as f:
-                testo = dddd_ocr.classification(f.read())
-            numeri = re.findall(r'\d+', testo)
-            if len(numeri) >= 2:
-                numeri_rilevati = [int(n) for n in numeri[:2]]
-        except:
-            pass
+                img_bytes = f.read()
+            
+            testo = dddd_ocr.classification(img_bytes)
+            log(f"   📝 DdddOcr -> '{testo}'")
+            
+            if testo:
+                # Cerca pattern come "5+2" o "5 + 2"
+                match = re.search(r'(\d+)\s*([+\-])\s*(\d+)', testo)
+                if match:
+                    num1 = int(match.group(1))
+                    operatore = match.group(2)
+                    num2 = int(match.group(3))
+                    os.remove(temp_path)
+                    return num1, num2, operatore
+                
+                # Fallback: estrai solo numeri
+                numeri = re.findall(r'\d+', testo)
+                if len(numeri) >= 2:
+                    os.remove(temp_path)
+                    return int(numeri[0]), int(numeri[1]), None
+        except Exception as e:
+            log(f"   ⚠️ DdddOcr errore: {e}")
     
     # Livello 2: EasyOCR
-    if len(numeri_rilevati) < 2 and easy_ocr:
+    if easy_ocr:
         try:
             results = easy_ocr.readtext(processed)
             testo = ' '.join([t[1] for t in results if t[2] > 0.5])
+            log(f"   📝 EasyOCR -> '{testo}'")
+            
+            # Converti parole in numeri
+            testo = converti_parole_in_numeri(testo)
+            
+            match = re.search(r'(\d+)\s*([+\-])\s*(\d+)', testo)
+            if match:
+                num1 = int(match.group(1))
+                operatore = match.group(2)
+                num2 = int(match.group(3))
+                os.remove(temp_path)
+                return num1, num2, operatore
+            
             numeri = re.findall(r'\d+', testo)
             if len(numeri) >= 2:
-                numeri_rilevati = [int(n) for n in numeri[:2]]
-        except:
-            pass
+                os.remove(temp_path)
+                return int(numeri[0]), int(numeri[1]), None
+        except Exception as e:
+            log(f"   ⚠️ EasyOCR errore: {e}")
     
     # Livello 3: Tesseract
-    if len(numeri_rilevati) < 2:
-        try:
-            config = '--psm 8 -c tessedit_char_whitelist=0123456789+'
-            testo = pytesseract.image_to_string(processed, config=config)
-            numeri = re.findall(r'\d+', testo)
-            if len(numeri) >= 2:
-                numeri_rilevati = [int(n) for n in numeri[:2]]
-        except:
-            pass
+    try:
+        config = '--psm 8 -c tessedit_char_whitelist=0123456789+-'
+        testo = pytesseract.image_to_string(processed, config=config)
+        log(f"   📝 Tesseract -> '{testo}'")
+        
+        testo = converti_parole_in_numeri(testo)
+        match = re.search(r'(\d+)\s*([+\-])\s*(\d+)', testo)
+        if match:
+            num1 = int(match.group(1))
+            operatore = match.group(2)
+            num2 = int(match.group(3))
+            os.remove(temp_path)
+            return num1, num2, operatore
+        
+        numeri = re.findall(r'\d+', testo)
+        if len(numeri) >= 2:
+            os.remove(temp_path)
+            return int(numeri[0]), int(numeri[1]), None
+    except Exception as e:
+        log(f"   ⚠️ Tesseract errore: {e}")
     
-    # Pulisci
-    if os.path.exists(temp_path):
-        os.remove(temp_path)
-    
-    if len(numeri_rilevati) >= 2:
-        return numeri_rilevati[0], numeri_rilevati[1]
-    
-    return None, None
+    os.remove(temp_path)
+    return None, None, None
 
 def upload_captcha_to_supabase(image_path, surfses, urlid, qpic):
     """Upload captcha matematico non risolto su Supabase Storage"""
@@ -461,13 +558,25 @@ def risolvi_captcha_matematico(surfses, image_path):
     log(f"   📊 Opzioni disponibili: {opzioni}")
     
     # OCR per leggere i numeri dall'immagine
-    num1, num2 = riconosci_operazione_da_immagine(image_path)
+    num1, num2, operatore = riconosci_operazione_da_immagine(image_path)
     
     if num1 is None or num2 is None:
         log("   ❌ OCR non ha riconosciuto i numeri")
         return None
     
-    log(f"   📝 OCR rilevati: {num1} e {num2}")
+    log(f"   📝 OCR rilevati: {num1} e {num2}, operatore: {operatore}")
+    
+    # Se abbiamo l'operatore, usalo
+    if operatore == '+':
+        risultato = num1 + num2
+        if risultato in opzioni:
+            log(f"   ✅ {num1} + {num2} = {risultato} → nelle opzioni")
+            return converti_numero_in_parole(risultato)
+    elif operatore == '-':
+        risultato = num1 - num2
+        if risultato in opzioni:
+            log(f"   ✅ {num1} - {num2} = {risultato} → nelle opzioni")
+            return converti_numero_in_parole(risultato)
     
     # Prova somma
     somma = num1 + num2
