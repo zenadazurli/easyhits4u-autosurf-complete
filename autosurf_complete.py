@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
 # autosurf_complete.py - Autosurf completo per EasyHits4U
-# Supporta: captcha a figure (FAISS) e captcha matematici (RapidOCR/DdddOcr + somma/differenza)
 
 import os
 import sys
@@ -304,7 +303,7 @@ def init_ocr():
         rapid_ocr = RapidOCR()
         log("✅ RapidOCR pronto")
     except ImportError:
-        log("⚠️ RapidOCR non installato (opzionale)")
+        log("⚠️ RapidOCR non installato")
         rapid_ocr = None
     except Exception as e:
         log(f"⚠️ Errore RapidOCR: {e}")
@@ -312,20 +311,27 @@ def init_ocr():
 
 # ================ FUNZIONI PER CAPTCHA MATEMATICI ====================
 def preprocess_math_image(image_path):
-    """Preprocessing per migliorare il riconoscimento OCR"""
-    img = cv2.imread(image_path, cv2.IMREAD_GRAYSCALE)
+    """Preprocessing avanzato per OCR captcha matematici"""
+    img = cv2.imread(image_path)
     if img is None:
         return None
     
-    # Ridimensiona per migliorare la qualità
-    img = cv2.resize(img, None, fx=2, fy=2, interpolation=cv2.INTER_CUBIC)
+    # Converti in scala di grigi
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
     
-    # Denoise
-    denoised = cv2.fastNlMeansDenoising(img, None, 10, 7, 21)
+    # Aumenta contrasto (CLAHE)
+    clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8,8))
+    enhanced = clahe.apply(gray)
+    
+    # Riduci rumore
+    denoised = cv2.fastNlMeansDenoising(enhanced, None, 15, 7, 21)
     
     # Binarizzazione adattiva
     binary = cv2.adaptiveThreshold(denoised, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-                                   cv2.THRESH_BINARY, 11, 2)
+                                   cv2.THRESH_BINARY, 15, 2)
+    
+    # Ridimensiona per migliorare OCR
+    binary = cv2.resize(binary, None, fx=2, fy=2, interpolation=cv2.INTER_CUBIC)
     
     return binary
 
@@ -359,26 +365,32 @@ def converti_numero_in_parole(num):
     return str(num)
 
 def riconosci_testo_da_immagine(image_path):
-    """Usa preprocessing + RapidOCR/DdddOcr"""
+    """Usa RapidOCR poi DdddOcr con preprocessing avanzato"""
     
     processed = preprocess_math_image(image_path)
     
     if processed is None:
         return None
     
-    # Prova RapidOCR prima
+    # Salva per debug
+    cv2.imwrite("debug_processed.jpg", processed)
+    
+    # Prova con RapidOCR
     if rapid_ocr:
         try:
-            result, _ = rapid_ocr(processed)
+            processed_rgb = cv2.cvtColor(processed, cv2.COLOR_GRAY2RGB)
+            result, _ = rapid_ocr(processed_rgb)
+            
             if result and len(result) > 0:
-                testo = ' '.join([item[1] for item in result])
-                if testo:
+                texts = [item[1] for item in result]
+                testo = ' '.join(texts)
+                if testo and len(testo) > 2:
                     log(f"   📝 RapidOCR: '{testo}'")
                     return testo
         except Exception as e:
             log(f"   ⚠️ RapidOCR errore: {e}")
     
-    # Prova DdddOcr
+    # Prova con DdddOcr
     if dddd_ocr:
         try:
             _, buffer = cv2.imencode('.jpg', processed)
@@ -735,60 +747,4 @@ def main():
                     log(f"✅ OK #{captcha_counter} (punteggio: {warning})")
                     
                 else:
-                    # CAPTCHA MATEMATICO
-                    log("🧮 Captcha matematico rilevato")
-                    
-                    surfses = data.get("surfses", {})
-                    
-                    img_data = session.get(f"https://www.easyhits4u.com/simg/{qpic}.jpg", verify=False).content
-                    temp_path = "temp_math.jpg"
-                    with open(temp_path, "wb") as f:
-                        f.write(img_data)
-                    
-                    risposta_parola = risolvi_captcha_matematico(surfses, temp_path)
-                    
-                    if risposta_parola is None:
-                        log("❌ Captcha matematico NON RICONOSCIUTO")
-                        salva_errore_matematico(surfses, urlid, qpic, temp_path)
-                        if os.path.exists(temp_path):
-                            os.remove(temp_path)
-                        log("🛑 FERMO PER ANALISI")
-                        return
-                    
-                    log(f"📤 Invio risposta: word={risposta_parola}")
-                    time.sleep(seconds)
-                    
-                    resp = session.get(
-                        f"https://www.easyhits4u.com/surf/?f=surf&urlid={urlid}&surftype=2"
-                        f"&ajax=1&word={risposta_parola}&screen_width=1024&screen_height=768",
-                        verify=False
-                    )
-                    
-                    resp_data = resp.json()
-                    warning = resp_data.get("warning")
-                    
-                    if warning == "wrong_choice":
-                        log(f"❌ Wrong choice - '{risposta_parola}' sbagliata")
-                        salva_errore_matematico(surfses, urlid, qpic, temp_path)
-                        if os.path.exists(temp_path):
-                            os.remove(temp_path)
-                        log("🛑 FERMO PER ANALISI")
-                        return
-                    
-                    captcha_counter += 1
-                    log(f"✅ OK #{captcha_counter} (punteggio: {warning})")
-                    
-                    if os.path.exists(temp_path):
-                        os.remove(temp_path)
-                
-                time.sleep(2)
-                
-            except Exception as e:
-                log(f"❌ Errore: {e}")
-                import traceback
-                traceback.print_exc()
-                time.sleep(5)
-                break
-
-if __name__ == "__main__":
-    main()
+                    # CAP
