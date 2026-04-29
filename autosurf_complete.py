@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 # autosurf_complete.py - Autosurf completo per EasyHits4U
+# Versione: salta i captcha matematici non riconosciuti e continua
 
 import os
 import sys
@@ -316,7 +317,6 @@ def preprocess_math_image(image_path):
     if img is None:
         return None
     
-    # Converti in scala di grigi
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
     
     # Aumenta contrasto (CLAHE)
@@ -372,7 +372,6 @@ def riconosci_testo_da_immagine(image_path):
     if processed is None:
         return None
     
-    # Prova con RapidOCR
     if rapid_ocr:
         try:
             processed_rgb = cv2.cvtColor(processed, cv2.COLOR_GRAY2RGB)
@@ -387,7 +386,6 @@ def riconosci_testo_da_immagine(image_path):
         except Exception as e:
             log(f"   ⚠️ RapidOCR errore: {e}")
     
-    # Prova con DdddOcr
     if dddd_ocr:
         try:
             _, buffer = cv2.imencode('.jpg', processed)
@@ -689,7 +687,7 @@ def main():
                     break
                 
                 if picmap is not None and len(picmap) > 0:
-                    # CAPTCHA A FIGURE
+                    # ===== CAPTCHA A FIGURE =====
                     log("🎯 Captcha a figure rilevato")
                     
                     img_data = session.get(f"https://www.easyhits4u.com/simg/{qpic}.jpg", verify=False).content
@@ -710,7 +708,7 @@ def main():
                             seen[label] = i
                     
                     if chosen_idx is None:
-                        log("⚠️ Nessun duplicato, provo fallback pixel...")
+                        log("⚠️ Nessun duplicato per label, provo fallback pixel...")
                         chosen_idx = fallback_pixel_compare(crops)
                         if chosen_idx is not None:
                             log(f"🎯 Duplicato via fallback pixel: posizione {chosen_idx}")
@@ -744,51 +742,48 @@ def main():
                     log(f"✅ OK #{captcha_counter} (punteggio: {warning})")
                     
                 else:
-                    # CAPTCHA MATEMATICO
-                    log("🧮 Captcha matematico rilevato")
+                    # ===== CAPTCHA MATEMATICO - SALTA E CONTINUA =====
+                    log("🧮 Captcha matematico rilevato - SALTO PER RACCOLTA DATI")
                     
                     surfses = data.get("surfses", {})
                     
+                    # Scarica l'immagine per il training futuro
                     img_data = session.get(f"https://www.easyhits4u.com/simg/{qpic}.jpg", verify=False).content
                     temp_path = "temp_math.jpg"
                     with open(temp_path, "wb") as f:
                         f.write(img_data)
                     
+                    # Tenta il riconoscimento
                     risposta_parola = risolvi_captcha_matematico(surfses, temp_path)
                     
                     if risposta_parola is None:
-                        log("❌ Captcha matematico NON RICONOSCIUTO")
+                        log("⏭️ Captcha matematico non riconosciuto - SALVATO PER TRAINING")
                         salva_errore_matematico(surfses, urlid, qpic, temp_path)
-                        if os.path.exists(temp_path):
-                            os.remove(temp_path)
-                        log("🛑 FERMO PER ANALISI")
-                        return
+                        log("🔄 Continuo con il prossimo captcha...")
+                    else:
+                        log(f"📤 Invio risposta: word={risposta_parola}")
+                        time.sleep(seconds)
+                        resp = session.get(
+                            f"https://www.easyhits4u.com/surf/?f=surf&urlid={urlid}&surftype=2"
+                            f"&ajax=1&word={risposta_parola}&screen_width=1024&screen_height=768",
+                            verify=False
+                        )
+                        resp_data = resp.json()
+                        warning = resp_data.get("warning")
+                        
+                        if warning == "wrong_choice":
+                            log(f"❌ Wrong choice - '{risposta_parola}' sbagliata")
+                            salva_errore_matematico(surfses, urlid, qpic, temp_path)
+                        else:
+                            log(f"✅ OK #{captcha_counter} (punteggio: {warning})")
+                            captcha_counter += 1
                     
-                    log(f"📤 Invio risposta: word={risposta_parola}")
-                    time.sleep(seconds)
-                    
-                    resp = session.get(
-                        f"https://www.easyhits4u.com/surf/?f=surf&urlid={urlid}&surftype=2"
-                        f"&ajax=1&word={risposta_parola}&screen_width=1024&screen_height=768",
-                        verify=False
-                    )
-                    
-                    resp_data = resp.json()
-                    warning = resp_data.get("warning")
-                    
-                    if warning == "wrong_choice":
-                        log(f"❌ Wrong choice - '{risposta_parola}' sbagliata")
-                        salva_errore_matematico(surfses, urlid, qpic, temp_path)
-                        if os.path.exists(temp_path):
-                            os.remove(temp_path)
-                        log("🛑 FERMO PER ANALISI")
-                        return
-                    
-                    captcha_counter += 1
-                    log(f"✅ OK #{captcha_counter} (punteggio: {warning})")
-                    
+                    # Pulisci
                     if os.path.exists(temp_path):
                         os.remove(temp_path)
+                    
+                    time.sleep(seconds)
+                    continue
                 
                 time.sleep(2)
                 
