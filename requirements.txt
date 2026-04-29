@@ -14,3 +14,7 @@ pillow>=10.0.0
 torch>=2.0.0,<2.6.0
 torchvision>=0.15.0
 easyocr>=1.7.0
+
+# RapidOCR (alternativa più leggera e potente)
+rapidocr>=3.0.0
+onnxruntime
